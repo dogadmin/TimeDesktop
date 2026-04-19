@@ -64,10 +64,47 @@ const (
 	wmSETCURSOR     = 0x0020
 	wmTIMER         = 0x0113
 	wmLBUTTONDOWN   = 0x0201
+	wmLBUTTONUP     = 0x0202
+	wmMOUSEMOVE     = 0x0200
+	wmMOUSELEAVE    = 0x02A3
 	wmRBUTTONUP     = 0x0205
 	wmNCLBUTTONDOWN = 0x00A1
 	wmEXITSIZEMOVE  = 0x0232
+	wmHOTKEY        = 0x0312
+	wmDISPLAYCHANGE = 0x007E
 	htCAPTION       = 2
+
+	tme_LEAVE               = 0x00000002
+	monitorDefaultToNearest = 0x00000002
+	sw_HIDE                 = 0
+	sw_SHOWNA               = 8
+	mod_ALT                 = 0x0001
+	mod_CONTROL             = 0x0002
+	hotkeyIDToggle          = 1
+	timerCollapse           = 2
+	stripThick              = int32(14)
+	edgeExitThreshold       = int32(40)
+	collapseGraceMS         = 120
+
+	// 资源 / 图标
+	image_ICON     = 1
+	lr_DEFAULTSIZE = 0x00000040
+	lr_SHARED      = 0x00008000
+	appIconResID   = 1
+
+	// 系统托盘 Shell_NotifyIcon
+	nim_ADD          = 0x00000000
+	nim_MODIFY       = 0x00000001
+	nim_DELETE       = 0x00000002
+	nif_MESSAGE      = 0x00000001
+	nif_ICON         = 0x00000002
+	nif_TIP          = 0x00000004
+	wmTRAYCALLBACK   = 0x8001
+	wmLBUTTONDBLCLK  = 0x0203
+
+	// ChooseColor 对话框
+	cc_RGBINIT  = 0x00000001
+	cc_FULLOPEN = 0x00000002
 
 	mf_STRING       = 0x00000000
 	mf_POPUP        = 0x00000010
@@ -99,6 +136,8 @@ var (
 	user32   = windows.NewLazySystemDLL("user32.dll")
 	gdi32    = windows.NewLazySystemDLL("gdi32.dll")
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	shell32  = windows.NewLazySystemDLL("shell32.dll")
+	comdlg32 = windows.NewLazySystemDLL("comdlg32.dll")
 
 	procRegisterClassEx       = user32.NewProc("RegisterClassExW")
 	procCreateWindowEx        = user32.NewProc("CreateWindowExW")
@@ -131,6 +170,20 @@ var (
 	procGetDC                 = user32.NewProc("GetDC")
 	procReleaseDC             = user32.NewProc("ReleaseDC")
 	procMessageBoxW           = user32.NewProc("MessageBoxW")
+	procTrackMouseEvent       = user32.NewProc("TrackMouseEvent")
+	procMonitorFromWindow     = user32.NewProc("MonitorFromWindow")
+	procGetMonitorInfoW       = user32.NewProc("GetMonitorInfoW")
+	procKillTimer             = user32.NewProc("KillTimer")
+	procRegisterHotKey        = user32.NewProc("RegisterHotKey")
+	procUnregisterHotKey      = user32.NewProc("UnregisterHotKey")
+	procLoadImageW            = user32.NewProc("LoadImageW")
+	procSetForegroundWindow   = user32.NewProc("SetForegroundWindow")
+	procPostMessageW          = user32.NewProc("PostMessageW")
+	procRegisterWindowMessageW = user32.NewProc("RegisterWindowMessageW")
+
+	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
+
+	procChooseColorW = comdlg32.NewProc("ChooseColorW")
 
 	procCreateFontW           = gdi32.NewProc("CreateFontW")
 	procDeleteObject          = gdi32.NewProc("DeleteObject")
@@ -178,6 +231,51 @@ type paintStruct struct {
 	RgbReserved [32]byte
 }
 type sizeStruct struct{ CX, CY int32 }
+type trackMouseEventT struct {
+	Size      uint32
+	Flags     uint32
+	HwndTrack windows.HWND
+	HoverTime uint32
+}
+type monitorInfoT struct {
+	Size   uint32
+	RcMon  rect
+	RcWork rect
+	Flags  uint32
+}
+
+// NOTIFYICONDATAW — 用于 Shell_NotifyIconW。Go 会按各字段自然对齐自动加 padding，
+// x64 上总大小应为 976 字节，与 C 的 sizeof(NOTIFYICONDATAW) 一致。
+type notifyIconDataW struct {
+	CbSize           uint32
+	HWnd             windows.HWND
+	UID              uint32
+	UFlags           uint32
+	UCallbackMessage uint32
+	HIcon            windows.Handle
+	SzTip            [128]uint16
+	DwState          uint32
+	DwStateMask      uint32
+	SzInfo           [256]uint16
+	UVersion         uint32
+	SzInfoTitle      [64]uint16
+	DwInfoFlags      uint32
+	GuidItem         [16]byte
+	HBalloonIcon     windows.Handle
+}
+
+// CHOOSECOLOR — x64 大小 72 字节。
+type chooseColorW struct {
+	StructSize     uint32
+	HwndOwner      windows.HWND
+	HInstance      windows.HWND
+	RgbResult      uint32
+	LpCustColors   *uint32
+	Flags          uint32
+	LCustData      uintptr
+	LpfnHook       uintptr
+	LpTemplateName uintptr
+}
 
 func rgb(r, g, b uint8) uintptr { return uintptr(r) | uintptr(g)<<8 | uintptr(b)<<16 }
 func u16(s string) *uint16      { p, _ := syscall.UTF16PtrFromString(s); return p }
@@ -822,6 +920,14 @@ type appState struct {
 	WinX        int32       `json:"x"`
 	WinY        int32       `json:"y"`
 	Lang        string      `json:"lang"` // "cn" | "en"
+
+	DockMode     bool   `json:"dock_mode"`
+	DockEdge     int32  `json:"dock_edge"`     // edgeTop/edgeBottom/edgeLeft/edgeRight
+	DockAlong    int32  `json:"dock_along"`    // 沿边方向的起点坐标
+	Pinned       bool   `json:"pinned"`
+	DockColor    uint32 `json:"dock_color"`    // 边缘条颜色 (COLORREF 0x00BBGGRR)
+	HasDockColor bool   `json:"has_dock_color"` // 用户是否显式设置过边缘色（区分未设置 vs 纯黑）
+	StripOpacity int32  `json:"strip_opacity"`  // 折叠小条透明度 50..255
 }
 
 func isEN() bool { return state.Lang == "en" }
@@ -896,8 +1002,17 @@ func defaultState() appState {
 		WinX:        200,
 		WinY:        200,
 		Lang:        "cn",
+		DockMode:     false,
+		DockEdge:     edgeTop,
+		DockAlong:    200,
+		Pinned:       false,
+		DockColor:    rgbU32(60, 110, 200), // 默认蓝色边缘条
+		HasDockColor: false,                // 默认值，未被用户显式确认
+		StripOpacity: 160,                  // ~63% 较透
 	}
 }
+
+func rgbU32(r, g, b uint8) uint32 { return uint32(rgb(r, g, b)) }
 
 func loadState() appState {
 	s := defaultState()
@@ -919,6 +1034,16 @@ func loadState() appState {
 	}
 	if s.Opacity < 50 || s.Opacity > 255 {
 		s.Opacity = 235
+	}
+	if s.DockEdge < edgeTop || s.DockEdge > edgeRight {
+		s.DockEdge = edgeTop
+	}
+	if !s.HasDockColor {
+		// 旧配置或从未设置过：用默认蓝。之后用户显式选色（含选黑）会置 HasDockColor=true。
+		s.DockColor = rgbU32(60, 110, 200)
+	}
+	if s.StripOpacity < 50 || s.StripOpacity > 255 {
+		s.StripOpacity = 160
 	}
 	if len(s.Zones) == 0 {
 		s.Zones = []zoneEntry{localEntry()}
@@ -1001,15 +1126,48 @@ func syncNet(ctx context.Context) {
 // 全局 UI 状态
 // ============================================================================
 
+type dockPhase int
+
+const (
+	phaseNormal dockPhase = iota
+	phaseCollapsed
+	phaseExpanding
+	phaseHidden
+)
+
+// DockEdge 方向：数值即持久化到 registry 的 dock_edge 字段，不能随意调整顺序。
+const (
+	edgeTop    int32 = 0
+	edgeBottom int32 = 1
+	edgeLeft   int32 = 2
+	edgeRight  int32 = 3
+)
+
 var (
-	hwnd    windows.HWND
-	hfont   uintptr
-	bkBrush uintptr
+	hwnd        windows.HWND
+	hfont       uintptr
+	bkBrush     uintptr
+	accentBrush uintptr
 
 	// state 只在 UI 线程访问（runtime.LockOSThread 锁在 main 里）。
 	// 唯一的后台 goroutine syncNet 只写 netOffsetNS 原子字段，不碰 state。
 	// 所以这里不需要 mutex。
 	state appState
+
+	// 运行时停靠状态（不持久化）
+	phase         dockPhase
+	hoverTracking bool
+	hidden        bool
+
+	// 图标 / 托盘 / ChooseColor 运行时状态
+	hAppIcon          uintptr
+	hAppIcon16        uintptr
+	trayAdded         bool
+	taskbarCreatedMsg uint32
+	custColors        [16]uint32
+
+	// 窗口可见性缓存 — 避免 applyDockLayout 每次调用都重复 ShowWindow
+	windowVisible = true // CreateWindowEx 用了 WS_VISIBLE
 
 	menuCBs   = map[uint32]func(){}
 	nextCmdID uint32 = 2000
@@ -1048,6 +1206,10 @@ func ensureBrush() {
 		procDeleteObject.Call(bkBrush)
 		bkBrush = 0
 	}
+	if accentBrush != 0 {
+		procDeleteObject.Call(accentBrush)
+		accentBrush = 0
+	}
 	var col uintptr
 	if state.Dark {
 		col = rgb(22, 24, 30)
@@ -1056,6 +1218,8 @@ func ensureBrush() {
 	}
 	r, _, _ := procCreateSolidBrush.Call(col)
 	bkBrush = r
+	r2, _, _ := procCreateSolidBrush.Call(uintptr(state.DockColor))
+	accentBrush = r2
 }
 
 func textColor() uintptr {
@@ -1165,6 +1329,13 @@ func paint(h windows.HWND) {
 
 	var cr rect
 	procGetClientRect.Call(uintptr(h), uintptr(unsafe.Pointer(&cr)))
+
+	// 折叠状态：整块填 accent 色，不画文字
+	if state.DockMode && phase == phaseCollapsed {
+		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&cr)), accentBrush)
+		return
+	}
+
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&cr)), bkBrush)
 
 	procSelectObject.Call(hdc, hfont)
@@ -1204,16 +1375,323 @@ func desiredSize() (w, h int32) {
 }
 
 func resizeWindow() {
-	w, h := desiredSize()
+	applyDockLayout()
+}
+
+var lastOpacity int32 = -1
+
+func applyOpacity() {
+	op := state.Opacity
+	if state.DockMode && phase == phaseCollapsed {
+		op = state.StripOpacity
+	}
+	if op == lastOpacity {
+		return
+	}
+	lastOpacity = op
+	procSetLayeredWindowAttrs.Call(uintptr(hwnd), 0, uintptr(op), lwa_ALPHA)
+}
+
+// ============================================================================
+// 边缘停靠：几何 / 布局 / 热键
+// ============================================================================
+
+func getWindowRect(h windows.HWND) rect {
+	var rc rect
+	procGetWindowRect.Call(uintptr(h), uintptr(unsafe.Pointer(&rc)))
+	return rc
+}
+
+func getCursorPosPt() point {
+	var pt point
+	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	return pt
+}
+
+func getWorkArea() rect {
+	mi := monitorInfoT{Size: uint32(unsafe.Sizeof(monitorInfoT{}))}
+	mon, _, _ := procMonitorFromWindow.Call(uintptr(hwnd), monitorDefaultToNearest)
+	if mon == 0 {
+		// 兜底：整屏 1920x1080
+		return rect{0, 0, 1920, 1080}
+	}
+	procGetMonitorInfoW.Call(mon, uintptr(unsafe.Pointer(&mi)))
+	return mi.RcWork
+}
+
+func clamp(v, lo, hi int32) int32 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// edgeIsHorizontal：上/下边沿 x 轴延伸；左/右边沿 y 轴延伸。
+func edgeIsHorizontal(edge int32) bool { return edge == edgeTop || edge == edgeBottom }
+
+// dockedRect 计算停靠矩形：thick 是垂直边方向的厚度（折叠=stripThick，展开=fh/fw）。
+// 折叠态和展开态除了厚度以外形状完全相同，所以合并成一个函数。
+func dockedRect(work rect, fw, fh, thick int32) rect {
+	along := state.DockAlong
+	switch state.DockEdge {
+	case edgeTop:
+		along = clamp(along, work.Left, work.Right-fw)
+		return rect{along, work.Top, along + fw, work.Top + thick}
+	case edgeBottom:
+		along = clamp(along, work.Left, work.Right-fw)
+		return rect{along, work.Bottom - thick, along + fw, work.Bottom}
+	case edgeLeft:
+		along = clamp(along, work.Top, work.Bottom-fh)
+		return rect{work.Left, along, work.Left + thick, along + fh}
+	case edgeRight:
+		along = clamp(along, work.Top, work.Bottom-fh)
+		return rect{work.Right - thick, along, work.Right, along + fh}
+	}
+	return rect{along, work.Top, along + fw, work.Top + thick}
+}
+
+func stripRect(work rect, fw, fh int32) rect { return dockedRect(work, fw, fh, stripThick) }
+
+func expandedRect(work rect, fw, fh int32) rect {
+	thick := fh
+	if !edgeIsHorizontal(state.DockEdge) {
+		thick = fw
+	}
+	return dockedRect(work, fw, fh, thick)
+}
+
+// perpDistanceToEdge 拖动结束时窗口到所选边的垂直距离。
+func perpDistanceToEdge(rc, work rect, edge int32) int32 {
+	var d int32
+	switch edge {
+	case edgeTop:
+		d = rc.Top - work.Top
+	case edgeBottom:
+		d = work.Bottom - rc.Bottom
+	case edgeLeft:
+		d = rc.Left - work.Left
+	case edgeRight:
+		d = work.Right - rc.Right
+	}
+	if d < 0 {
+		d = -d
+	}
+	return d
+}
+
+// alongCoord 从矩形中提取沿边方向的起点坐标。
+func alongCoord(rc rect, edge int32) int32 {
+	if edgeIsHorizontal(edge) {
+		return rc.Left
+	}
+	return rc.Top
+}
+
+// centerAlong 在 work area 内按完整窗口尺寸居中计算沿边起点。
+func centerAlong(edge int32) int32 {
+	work := getWorkArea()
+	fw, fh := desiredSize()
+	if edgeIsHorizontal(edge) {
+		return work.Left + (work.Right-work.Left-fw)/2
+	}
+	return work.Top + (work.Bottom-work.Top-fh)/2
+}
+
+func setWindowRect(x, y, w, h int32) {
 	procSetWindowPos.Call(uintptr(hwnd), 0,
-		uintptr(state.WinX), uintptr(state.WinY),
+		uintptr(x), uintptr(y),
 		uintptr(w), uintptr(h),
 		swp_NOZORDER|swp_NOACTIVATE)
+}
+
+func cursorInWindow(h windows.HWND) bool {
+	rc := getWindowRect(h)
+	pt := getCursorPosPt()
+	return pt.X >= rc.Left && pt.X < rc.Right && pt.Y >= rc.Top && pt.Y < rc.Bottom
+}
+
+func setVisible(show bool) {
+	if show == windowVisible {
+		return
+	}
+	windowVisible = show
+	cmd := uintptr(sw_HIDE)
+	if show {
+		cmd = sw_SHOWNA
+	}
+	procShowWindow.Call(uintptr(hwnd), cmd)
+}
+
+func applyDockLayout() {
+	fw, fh := desiredSize()
+
+	if hidden {
+		phase = phaseHidden
+		setVisible(false)
+		return
+	}
+
+	if !state.DockMode {
+		phase = phaseNormal
+		setWindowRect(state.WinX, state.WinY, fw, fh)
+		applyOpacity()
+		setVisible(true)
+		procInvalidateRect.Call(uintptr(hwnd), 0, 1)
+		return
+	}
+
+	work := getWorkArea()
+	var r rect
+	if state.Pinned || phase == phaseExpanding {
+		phase = phaseExpanding
+		r = expandedRect(work, fw, fh)
+	} else {
+		phase = phaseCollapsed
+		r = stripRect(work, fw, fh)
+	}
+	setWindowRect(r.Left, r.Top, r.Right-r.Left, r.Bottom-r.Top)
+	applyOpacity()
+	setVisible(true)
 	procInvalidateRect.Call(uintptr(hwnd), 0, 1)
 }
 
-func applyOpacity() {
-	procSetLayeredWindowAttrs.Call(uintptr(hwnd), 0, uintptr(state.Opacity), lwa_ALPHA)
+func registerHotkey() {
+	procRegisterHotKey.Call(uintptr(hwnd), hotkeyIDToggle,
+		mod_CONTROL|mod_ALT, uintptr('T'))
+}
+
+func unregisterHotkey() {
+	procUnregisterHotKey.Call(uintptr(hwnd), hotkeyIDToggle)
+}
+
+// enterDockMode 按当前窗口位置挑最近的边吸附，并注册全局快捷键。
+func enterDockMode() {
+	rc := getWindowRect(hwnd)
+	work := getWorkArea()
+	cx := (rc.Left + rc.Right) / 2
+	cy := (rc.Top + rc.Bottom) / 2
+
+	dTop := cy - work.Top
+	dBottom := work.Bottom - cy
+	dLeft := cx - work.Left
+	dRight := work.Right - cx
+
+	edge := edgeTop
+	best := dTop
+	if dBottom < best {
+		edge = edgeBottom
+		best = dBottom
+	}
+	if dLeft < best {
+		edge = edgeLeft
+		best = dLeft
+	}
+	if dRight < best {
+		edge = edgeRight
+	}
+	state.DockEdge = edge
+
+	// 沿边起点：沿用当前窗口的沿边坐标，保持视觉上不跳位
+	fw, fh := desiredSize()
+	if edgeIsHorizontal(edge) {
+		state.DockAlong = clamp(rc.Left, work.Left, work.Right-fw)
+	} else {
+		state.DockAlong = clamp(rc.Top, work.Top, work.Bottom-fh)
+	}
+
+	phase = phaseCollapsed
+}
+
+func leaveDockMode() {
+	// 还原到普通悬浮模式：保留停靠前的 WinX/WinY（不覆盖），
+	// 这样从菜单关闭停靠后窗口会回到之前的悬浮位置。
+	// 拖离边缘退出停靠这条路径则由 wmEXITSIZEMOVE 显式更新 WinX/WinY。
+	// 热键 / 托盘图标保持注册，隐藏功能在任何模式下都可用。
+	phase = phaseNormal
+	hoverTracking = false
+}
+
+// ============================================================================
+// 图标 / 托盘 / 颜色选择器
+// ============================================================================
+
+func loadAppIcon(w, h int32) uintptr {
+	hInst, _, _ := procGetModuleHandleW.Call(0)
+	r, _, _ := procLoadImageW.Call(
+		hInst,
+		uintptr(appIconResID), // MAKEINTRESOURCE(1)
+		image_ICON,
+		uintptr(w), uintptr(h),
+		lr_SHARED,
+	)
+	return r
+}
+
+func trayAdd() {
+	if trayAdded {
+		return
+	}
+	nid := notifyIconDataW{
+		CbSize:           uint32(unsafe.Sizeof(notifyIconDataW{})),
+		HWnd:             hwnd,
+		UID:              1,
+		UFlags:           nif_MESSAGE | nif_ICON | nif_TIP,
+		UCallbackMessage: wmTRAYCALLBACK,
+		HIcon:            windows.Handle(hAppIcon16),
+	}
+	// szTip 最多 128 个字符（含 NUL）
+	tip, _ := syscall.UTF16FromString("DesktopTime · Ctrl+Alt+T 切换显示")
+	if len(tip) > len(nid.SzTip) {
+		tip = tip[:len(nid.SzTip)]
+		tip[len(tip)-1] = 0
+	}
+	copy(nid.SzTip[:], tip)
+	r, _, _ := procShellNotifyIconW.Call(nim_ADD, uintptr(unsafe.Pointer(&nid)))
+	trayAdded = r != 0
+}
+
+func trayRemove() {
+	if !trayAdded {
+		return
+	}
+	nid := notifyIconDataW{
+		CbSize: uint32(unsafe.Sizeof(notifyIconDataW{})),
+		HWnd:   hwnd,
+		UID:    1,
+	}
+	procShellNotifyIconW.Call(nim_DELETE, uintptr(unsafe.Pointer(&nid)))
+	trayAdded = false
+}
+
+// pickCustomColor 弹出 Windows 自带的调色板对话框。返回 (color, ok)。
+func pickCustomColor(current uint32) (uint32, bool) {
+	cc := chooseColorW{
+		StructSize:   uint32(unsafe.Sizeof(chooseColorW{})),
+		HwndOwner:    hwnd,
+		RgbResult:    current,
+		LpCustColors: &custColors[0],
+		Flags:        cc_RGBINIT | cc_FULLOPEN,
+	}
+	r, _, _ := procChooseColorW.Call(uintptr(unsafe.Pointer(&cc)))
+	if r == 0 {
+		return 0, false
+	}
+	return cc.RgbResult, true
+}
+
+var dockColorPresets = []struct {
+	cn, en string
+	rgb    uint32
+}{
+	{"蓝", "Blue", rgbU32(60, 110, 200)},
+	{"紫", "Purple", rgbU32(145, 85, 195)},
+	{"青", "Teal", rgbU32(45, 170, 180)},
+	{"绿", "Green", rgbU32(80, 170, 95)},
+	{"橙", "Orange", rgbU32(230, 140, 55)},
+	{"粉", "Pink", rgbU32(225, 100, 140)},
 }
 
 // ============================================================================
@@ -1381,6 +1859,106 @@ func buildMenu() uintptr {
 	}), "English", checkedFlag(state.Lang == "en"))
 	appendSub(root, langSub, tr("语言", "Language"), 0)
 
+	// ---- 停靠 / Dock ----
+	dockSub := newPopupMenu()
+
+	appendStr(dockSub, registerCmd(func() {
+		state.DockMode = !state.DockMode
+		if state.DockMode {
+			enterDockMode()
+		} else {
+			leaveDockMode()
+		}
+		saveState()
+		applyDockLayout()
+	}), tr("边缘停靠", "Edge dock"), checkedFlag(state.DockMode))
+
+	appendSep(dockSub)
+
+	for _, pair := range []struct {
+		cn, en string
+		edge   int32
+	}{
+		{"吸附到上边", "Dock top", edgeTop},
+		{"吸附到下边", "Dock bottom", edgeBottom},
+		{"吸附到左边", "Dock left", edgeLeft},
+		{"吸附到右边", "Dock right", edgeRight},
+	} {
+		pp := pair
+		flags := checkedFlag(state.DockEdge == pp.edge)
+		if !state.DockMode {
+			flags |= mf_GRAYED
+		}
+		appendStr(dockSub, registerCmd(func() {
+			state.DockEdge = pp.edge
+			state.DockAlong = centerAlong(pp.edge)
+			phase = phaseCollapsed
+			saveState()
+			applyDockLayout()
+		}), tr(pp.cn, pp.en), flags)
+	}
+
+	appendSep(dockSub)
+
+	pinFlags := checkedFlag(state.Pinned)
+	if !state.DockMode {
+		pinFlags |= mf_GRAYED
+	}
+	appendStr(dockSub, registerCmd(func() {
+		state.Pinned = !state.Pinned
+		saveState()
+		applyDockLayout()
+	}), tr("固定展开", "Pin expanded"), pinFlags)
+
+	// 隐藏在任何模式下都可用
+	appendStr(dockSub, registerCmd(func() {
+		hidden = !hidden
+		applyDockLayout()
+	}), tr("隐藏 (Ctrl+Alt+T)", "Hide (Ctrl+Alt+T)"), checkedFlag(hidden))
+
+	appendSep(dockSub)
+
+	// ---- 边缘色 ----
+	colorSub := newPopupMenu()
+	for _, p := range dockColorPresets {
+		pp := p
+		appendStr(colorSub, registerCmd(func() {
+			state.DockColor = pp.rgb
+			state.HasDockColor = true
+			saveState()
+			ensureBrush()
+			procInvalidateRect.Call(uintptr(hwnd), 0, 1)
+		}), tr(pp.cn, pp.en), checkedFlag(state.HasDockColor && state.DockColor == pp.rgb))
+	}
+	appendSep(colorSub)
+	appendStr(colorSub, registerCmd(func() {
+		if c, ok := pickCustomColor(state.DockColor); ok {
+			state.DockColor = c
+			state.HasDockColor = true
+			saveState()
+			ensureBrush()
+			procInvalidateRect.Call(uintptr(hwnd), 0, 1)
+		}
+	}), tr("自定义…", "Custom…"), 0)
+	appendSub(dockSub, colorSub, tr("边缘色", "Strip color"), 0)
+
+	// ---- 小条透明度 ----
+	stripOpSub := newPopupMenu()
+	for _, p := range []struct {
+		label string
+		val   int32
+	}{{"100%", 255}, {"80%", 204}, {"60%", 153}, {"40%", 102}, {"25%", 64}} {
+		pp := p
+		appendStr(stripOpSub, registerCmd(func() {
+			state.StripOpacity = pp.val
+			saveState()
+			applyOpacity()
+		}), pp.label, checkedFlag(state.StripOpacity == pp.val))
+	}
+	appendSub(dockSub, stripOpSub, tr("小条透明度", "Strip opacity"), 0)
+
+	appendSub(root, dockSub, tr("停靠", "Dock"), 0)
+
 	appendSep(root)
 
 	// ---- 恢复默认 ----
@@ -1393,13 +1971,18 @@ func buildMenu() uintptr {
 		saveState()
 		ensureBrush()
 		ensureFont()
-		applyOpacity()
-		resizeWindow()
+		hidden = false
+		phase = phaseNormal
+		applyDockLayout()
 	}), tr("恢复默认", "Reset to defaults"), 0)
 
 	// ---- 退出 ----
 	appendStr(root, registerCmd(func() {
-		saveWindowPos()
+		if !state.DockMode {
+			saveWindowPos()
+		}
+		unregisterHotkey()
+		trayRemove()
 		saveState()
 		procPostQuitMessage.Call(0)
 	}), tr("退出", "Quit"), 0)
@@ -1408,8 +1991,7 @@ func buildMenu() uintptr {
 }
 
 func showMenu() {
-	var pt point
-	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	pt := getCursorPosPt()
 	menu := buildMenu()
 	defer procDestroyMenu.Call(menu)
 	r, _, _ := procTrackPopupMenu.Call(menu,
@@ -1427,14 +2009,19 @@ func showMenu() {
 // ============================================================================
 
 func saveWindowPos() {
-	var rc rect
-	procGetWindowRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rc)))
+	rc := getWindowRect(hwnd)
 	state.WinX = rc.Left
 	state.WinY = rc.Top
 	saveState()
 }
 
 func wndProc(h windows.HWND, msg uint32, wp, lp uintptr) uintptr {
+	// Explorer 重启后会广播 "TaskbarCreated"，这时要重新添加托盘图标
+	if taskbarCreatedMsg != 0 && msg == taskbarCreatedMsg {
+		trayAdded = false
+		trayAdd()
+		return 0
+	}
 	switch msg {
 	case wmERASEBKGND:
 		return 1
@@ -1442,7 +2029,38 @@ func wndProc(h windows.HWND, msg uint32, wp, lp uintptr) uintptr {
 		paint(h)
 		return 0
 	case wmTIMER:
+		if wp == timerCollapse {
+			procKillTimer.Call(uintptr(h), timerCollapse)
+			if state.DockMode && !state.Pinned && !hidden && phase == phaseExpanding && !cursorInWindow(h) {
+				phase = phaseCollapsed
+				applyDockLayout()
+			}
+			return 0
+		}
 		procInvalidateRect.Call(uintptr(h), 0, 0)
+		return 0
+	case wmMOUSEMOVE:
+		if state.DockMode && !hidden {
+			if phase == phaseCollapsed {
+				phase = phaseExpanding
+				applyDockLayout()
+			}
+			if !hoverTracking {
+				tme := trackMouseEventT{
+					Size:      uint32(unsafe.Sizeof(trackMouseEventT{})),
+					Flags:     tme_LEAVE,
+					HwndTrack: h,
+				}
+				procTrackMouseEvent.Call(uintptr(unsafe.Pointer(&tme)))
+				hoverTracking = true
+			}
+		}
+		return 0
+	case wmMOUSELEAVE:
+		hoverTracking = false
+		if state.DockMode && !state.Pinned && !hidden && phase == phaseExpanding {
+			procSetTimer.Call(uintptr(h), timerCollapse, uintptr(collapseGraceMS), 0)
+		}
 		return 0
 	case wmLBUTTONDOWN:
 		procReleaseCapture.Call()
@@ -1452,18 +2070,67 @@ func wndProc(h windows.HWND, msg uint32, wp, lp uintptr) uintptr {
 		showMenu()
 		return 0
 	case wmEXITSIZEMOVE:
-		saveWindowPos()
+		if state.DockMode {
+			rc := getWindowRect(h)
+			work := getWorkArea()
+			if perpDistanceToEdge(rc, work, state.DockEdge) > edgeExitThreshold {
+				// 拖离边缘 → 退出停靠，把拖到的位置作为新悬浮位置
+				state.DockMode = false
+				state.Pinned = false
+				hidden = false
+				hoverTracking = false
+				state.WinX = rc.Left
+				state.WinY = rc.Top
+				applyDockLayout()
+			} else {
+				state.DockAlong = alongCoord(rc, state.DockEdge)
+				applyDockLayout()
+			}
+			saveState()
+		} else {
+			saveWindowPos()
+		}
+		return 0
+	case wmHOTKEY:
+		if wp == hotkeyIDToggle {
+			hidden = !hidden
+			applyDockLayout()
+		}
+		return 0
+	case wmTRAYCALLBACK:
+		// lp 低字是鼠标事件类型
+		switch uint32(lp) {
+		case wmRBUTTONUP:
+			// 托盘右键：同样的上下文菜单
+			procSetForegroundWindow.Call(uintptr(h))
+			showMenu()
+			procPostMessageW.Call(uintptr(h), 0 /* WM_NULL */, 0, 0)
+		case wmLBUTTONUP, wmLBUTTONDBLCLK:
+			hidden = !hidden
+			applyDockLayout()
+		}
+		return 0
+	case wmDISPLAYCHANGE:
+		if state.DockMode {
+			applyDockLayout()
+		}
 		return 0
 	case wmSETCURSOR:
 		cur, _, _ := procLoadCursorW.Call(0, idcARROW)
 		procSetCursor.Call(cur)
 		return 1
 	case wmCLOSE:
-		saveWindowPos()
+		if !state.DockMode {
+			saveWindowPos()
+		}
+		unregisterHotkey()
+		trayRemove()
 		saveState()
 		procPostQuitMessage.Call(0)
 		return 0
 	case wmDESTROY:
+		unregisterHotkey()
+		trayRemove()
 		procPostQuitMessage.Call(0)
 		return 0
 	}
@@ -1485,6 +2152,8 @@ func main() {
 
 	hInstance, _, _ := procGetModuleHandleW.Call(0)
 	hCursor, _, _ := procLoadCursorW.Call(0, idcARROW)
+	hAppIcon = loadAppIcon(0, 0) // LR_SHARED + DEFAULTSIZE 由内部处理
+	hAppIcon16 = loadAppIcon(16, 16)
 
 	classNameP := u16(appClassName)
 	wc := wndClassEx{
@@ -1492,8 +2161,10 @@ func main() {
 		Style:     cs_HREDRAW | cs_VREDRAW,
 		WndProc:   syscall.NewCallback(wndProc),
 		Instance:  windows.Handle(hInstance),
+		Icon:      windows.Handle(hAppIcon),
 		Cursor:    windows.Handle(hCursor),
 		ClassName: classNameP,
+		IconSm:    windows.Handle(hAppIcon16),
 	}
 	if ret, _, err := procRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc))); ret == 0 {
 		fatal(fmt.Sprintf("RegisterClassEx failed: %v", err))
@@ -1518,6 +2189,21 @@ func main() {
 	procUpdateWindow.Call(uintptr(hwnd))
 
 	procSetTimer.Call(uintptr(hwnd), timerRefresh, 1000, 0)
+
+	// 托盘图标 + "TaskbarCreated" 广播消息（Explorer 重启后恢复托盘）
+	taskbarCreatedMsg = uint32(func() uintptr {
+		r, _, _ := procRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(u16("TaskbarCreated"))))
+		return r
+	}())
+	trayAdd()
+
+	// 隐藏切换快捷键：全模式可用。Hidden 运行时状态不持久化，默认 false。
+	hidden = false
+	registerHotkey()
+	if state.DockMode {
+		phase = phaseCollapsed
+	}
+	applyDockLayout()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
